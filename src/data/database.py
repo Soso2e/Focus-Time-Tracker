@@ -152,6 +152,46 @@ class Database:
         row = cursor.fetchone()
         return dict(row) if row else None
     
+    def add_category(self, name: str, color: str = "#B2BEC3", is_productive: bool = True, parent_id: int = None) -> int:
+        """カテゴリを追加"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT INTO categories (name, color, is_productive, parent_id) VALUES (?, ?, ?, ?)",
+            (name, color, is_productive, parent_id)
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+    
+    def update_category(self, category_id: int, name: str = None, color: str = None, is_productive: bool = None) -> None:
+        """カテゴリを更新"""
+        cursor = self.conn.cursor()
+        updates = []
+        params = []
+        
+        if name is not None:
+            updates.append("name = ?")
+            params.append(name)
+        if color is not None:
+            updates.append("color = ?")
+            params.append(color)
+        if is_productive is not None:
+            updates.append("is_productive = ?")
+            params.append(is_productive)
+        
+        if updates:
+            params.append(category_id)
+            cursor.execute(f"UPDATE categories SET {', '.join(updates)} WHERE id = ?", params)
+            self.conn.commit()
+    
+    def delete_category(self, category_id: int) -> None:
+        """カテゴリを削除（関連ルールも削除）"""
+        cursor = self.conn.cursor()
+        # 関連ルールを削除
+        cursor.execute("DELETE FROM rules WHERE category_id = ?", (category_id,))
+        # カテゴリを削除
+        cursor.execute("DELETE FROM categories WHERE id = ?", (category_id,))
+        self.conn.commit()
+    
     # ルール関連
     def get_all_rules(self) -> List[Dict[str, Any]]:
         """すべてのルールを取得(優先度順)"""
@@ -159,8 +199,80 @@ class Database:
         cursor.execute("SELECT * FROM rules ORDER BY priority DESC, id")
         return [dict(row) for row in cursor.fetchall()]
     
+    def add_rule(self, match_target: str, pattern: str, category_id: int, 
+                 is_regex: bool = False, priority: int = 10) -> int:
+        """ルールを追加"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT INTO rules (match_target, pattern, is_regex, category_id, priority) VALUES (?, ?, ?, ?, ?)",
+            (match_target, pattern, is_regex, category_id, priority)
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+    
+    def update_rule(self, rule_id: int, match_target: str = None, pattern: str = None, 
+                    category_id: int = None, is_regex: bool = None, priority: int = None) -> None:
+        """ルールを更新"""
+        cursor = self.conn.cursor()
+        updates = []
+        params = []
+        
+        if match_target is not None:
+            updates.append("match_target = ?")
+            params.append(match_target)
+        if pattern is not None:
+            updates.append("pattern = ?")
+            params.append(pattern)
+        if category_id is not None:
+            updates.append("category_id = ?")
+            params.append(category_id)
+        if is_regex is not None:
+            updates.append("is_regex = ?")
+            params.append(is_regex)
+        if priority is not None:
+            updates.append("priority = ?")
+            params.append(priority)
+        
+        if updates:
+            params.append(rule_id)
+            cursor.execute(f"UPDATE rules SET {', '.join(updates)} WHERE id = ?", params)
+            self.conn.commit()
+    
+    def delete_rule(self, rule_id: int) -> None:
+        """ルールを削除"""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM rules WHERE id = ?", (rule_id,))
+        self.conn.commit()
+    
+    def get_rules_by_category(self, category_id: int) -> List[Dict[str, Any]]:
+        """特定カテゴリのルールを取得"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM rules WHERE category_id = ? ORDER BY priority DESC", (category_id,))
+        return [dict(row) for row in cursor.fetchall()]
+    
     def match_category(self, app_name: str, process_name: str = None, window_title: str = None) -> Optional[int]:
         """アプリ情報からカテゴリIDを判定"""
+        # コーディング関連のファイル拡張子リスト
+        coding_extensions = [
+            '.py', '.txt', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', '.hpp',
+            '.cs', '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.html', '.css', '.scss',
+            '.sass', '.less', '.json', '.xml', '.yaml', '.yml', '.md', '.sql', '.sh', '.bash',
+            '.bat', '.ps1', '.r', '.m', '.scala', '.pl', '.lua', '.vim', '.ini', '.cfg',
+            '.conf', '.toml', '.dart', '.vue', '.svelte', '.astro'
+        ]
+        
+        # ウィンドウタイトルにコーディング関連の拡張子が含まれているかチェック
+        if window_title:
+            window_title_lower = window_title.lower()
+            for ext in coding_extensions:
+                if ext in window_title_lower:
+                    # 「コーディング」カテゴリを取得
+                    coding_category = self.get_category_by_name("コーディング")
+                    if coding_category:
+                        return coding_category["id"]
+                    break
+        
+        # 通常のルールマッチング
         rules = self.get_all_rules()
         
         for rule in rules:
@@ -231,6 +343,51 @@ class Database:
         cursor = self.conn.cursor()
         cursor.execute("UPDATE events SET category_id = ? WHERE id = ?", (category_id, event_id))
         self.conn.commit()
+    
+    def reclassify_events(self, start_date: datetime = None, end_date: datetime = None) -> int:
+        """
+        イベントを再分類する
+        
+        Args:
+            start_date: 開始日時（Noneの場合は全期間）
+            end_date: 終了日時（Noneの場合は全期間）
+        
+        Returns:
+            再分類されたイベント数
+        """
+        cursor = self.conn.cursor()
+        
+        # 対象イベントを取得
+        if start_date and end_date:
+            cursor.execute(
+                "SELECT id, app_name, process_name, window_title FROM events WHERE start_at >= ? AND start_at < ?",
+                (start_date, end_date)
+            )
+        else:
+            cursor.execute("SELECT id, app_name, process_name, window_title FROM events")
+        
+        events = cursor.fetchall()
+        updated_count = 0
+        
+        for event in events:
+            event_id = event[0]
+            app_name = event[1]
+            process_name = event[2]
+            window_title = event[3]
+            
+            # 新しいカテゴリを判定
+            new_category_id = self.match_category(app_name, process_name, window_title)
+            
+            # カテゴリを更新
+            cursor.execute(
+                "UPDATE events SET category_id = ? WHERE id = ?",
+                (new_category_id, event_id)
+            )
+            updated_count += 1
+        
+        self.conn.commit()
+        return updated_count
+
     
     # セッション関連
     def add_session(self, start_at: datetime, end_at: datetime, category_id: int,

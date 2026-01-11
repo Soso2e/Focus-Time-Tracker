@@ -7,12 +7,13 @@ from typing import Dict, List, Any
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTabWidget, QTableWidget,
-    QTableWidgetItem, QHeaderView, QComboBox
+    QTableWidgetItem, QHeaderView, QComboBox, QMenu, QMessageBox
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 
 from ..data.database import Database
+from .category_rule_widget import CategoryRuleWidget
 
 
 class MainWindow(QMainWindow):
@@ -59,7 +60,13 @@ class MainWindow(QMainWindow):
         
         # 統計サマリー
         self.summary_label = QLabel()
-        self.summary_label.setStyleSheet("font-size: 14px; padding: 10px; background-color: #f0f0f0; border-radius: 5px;")
+        self.summary_label.setStyleSheet("""
+            font-size: 14px; 
+            padding: 10px; 
+            background-color: palette(alternate-base); 
+            border-radius: 5px;
+            color: palette(text);
+        """)
         layout.addWidget(self.summary_label)
         
         # タブ
@@ -74,9 +81,14 @@ class MainWindow(QMainWindow):
         
         # アプリ別タブ
         self.app_table = QTableWidget()
-        self.app_table.setColumnCount(3)
-        self.app_table.setHorizontalHeaderLabels(["アプリ", "時間", "カテゴリ"])
-        self.app_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.app_table.setColumnCount(4)
+        self.app_table.setHorizontalHeaderLabels(["アプリ", "時間", "現在のカテゴリ", "カテゴリ変更"])
+        self.app_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.app_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.app_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.app_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.app_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.app_table.customContextMenuRequested.connect(self._show_app_context_menu)
         tabs.addTab(self.app_table, "アプリ別")
         
         # セッションタブ
@@ -86,11 +98,23 @@ class MainWindow(QMainWindow):
         self.session_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         tabs.addTab(self.session_table, "集中セッション")
         
+        # カテゴリ・ルール設定タブ
+        self.category_rule_widget = CategoryRuleWidget(self.db)
+        self.category_rule_widget.data_changed.connect(self._load_data)  # 設定変更時にデータ再読み込み
+        tabs.addTab(self.category_rule_widget, "⚙️ 設定")
+        
         layout.addWidget(tabs)
         
         # フッター
         footer_layout = QHBoxLayout()
         footer_layout.addStretch()
+        
+        # イベント再分類ボタン
+        reclassify_btn = QPushButton("🔄 イベント再分類")
+        reclassify_btn.setToolTip("現在の期間のイベントを最新のルールで再分類します")
+        reclassify_btn.clicked.connect(self._reclassify_events)
+        footer_layout.addWidget(reclassify_btn)
+        
         refresh_btn = QPushButton("🔄 更新")
         refresh_btn.clicked.connect(self._load_data)
         footer_layout.addWidget(refresh_btn)
@@ -121,6 +145,30 @@ class MainWindow(QMainWindow):
             end = now
         
         return start, end
+    
+    def _reclassify_events(self) -> None:
+        """現在の期間のイベントを再分類"""
+        reply = QMessageBox.question(
+            self, "イベント再分類",
+            "現在表示されている期間のイベントを最新のルールで再分類しますか？\n\n"
+            "この操作により、過去のイベントのカテゴリが変更される可能性があります。",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                start_date, end_date = self._get_date_range()
+                count = self.db.reclassify_events(start_date, end_date)
+                
+                QMessageBox.information(
+                    self, "完了",
+                    f"{count}件のイベントを再分類しました。"
+                )
+                
+                # データを再読み込み
+                self._load_data()
+            except Exception as e:
+                QMessageBox.critical(self, "エラー", f"再分類に失敗しました: {e}")
     
     def _load_data(self) -> None:
         """データを読み込んで表示"""
@@ -200,6 +248,12 @@ class MainWindow(QMainWindow):
             name_item = QTableWidgetItem(cat["name"])
             if cat.get("color"):
                 name_item.setBackground(QColor(cat["color"]))
+                # 背景色が暗い場合は白文字、明るい場合は黒文字
+                color = QColor(cat["color"])
+                if color.lightness() < 128:
+                    name_item.setForeground(QColor("#FFFFFF"))
+                else:
+                    name_item.setForeground(QColor("#000000"))
             self.category_table.setItem(row, 0, name_item)
             
             # 時間
@@ -241,6 +295,9 @@ class MainWindow(QMainWindow):
         sorted_apps = sorted(app_stats.items(), key=lambda x: x[1]["time"], reverse=True)[:20]
         self.app_table.setRowCount(len(sorted_apps))
         
+        # カテゴリリストを取得
+        all_categories = self.db.get_all_categories()
+        
         for row, (app_name, stats) in enumerate(sorted_apps):
             # アプリ名
             self.app_table.setItem(row, 0, QTableWidgetItem(app_name))
@@ -250,9 +307,34 @@ class MainWindow(QMainWindow):
             minutes = int((stats["time"] % 3600) / 60)
             self.app_table.setItem(row, 1, QTableWidgetItem(f"{hours}h {minutes}m"))
             
-            # カテゴリ
+            # 現在のカテゴリ
             cat = categories.get(stats["category_id"], {"name": "不明"})
             self.app_table.setItem(row, 2, QTableWidgetItem(cat["name"]))
+            
+            # カテゴリ変更用コンボボックス
+            category_combo = QComboBox()
+            category_combo.addItem("カテゴリを選択...", None)
+            for category in all_categories:
+                category_combo.addItem(category["name"], category)
+            
+            # コンボボックスの変更イベントを接続
+            category_combo.currentIndexChanged.connect(
+                lambda index, a=app_name, combo=category_combo: self._on_app_category_changed(a, combo)
+            )
+            
+            self.app_table.setCellWidget(row, 3, category_combo)
+    
+    def _on_app_category_changed(self, app_name: str, combo: QComboBox) -> None:
+        """アプリ別タブのカテゴリコンボボックス変更時の処理"""
+        index = combo.currentIndex()
+        if index <= 0:  # "カテゴリを選択..." が選ばれた場合
+            return
+        
+        category = combo.itemData(index)
+        if category:
+            self._change_app_category(app_name, category)
+            # コンボボックスを初期状態に戻す
+            combo.setCurrentIndex(0)
     
     def _update_session_table(self, sessions: List[Dict], categories: Dict) -> None:
         """セッションテーブルを更新"""
@@ -283,3 +365,85 @@ class MainWindow(QMainWindow):
             # カテゴリ
             cat = categories.get(session.get("category_id"), {"name": "不明"})
             self.session_table.setItem(row, 3, QTableWidgetItem(cat["name"]))
+    
+    def _show_app_context_menu(self, position) -> None:
+        """アプリ別テーブルのコンテキストメニューを表示"""
+        row = self.app_table.rowAt(position.y())
+        if row < 0:
+            return
+        
+        app_name = self.app_table.item(row, 0).text()
+        
+        menu = QMenu(self)
+        
+        # カテゴリ変更サブメニュー
+        change_category_menu = menu.addMenu(f"「{app_name}」のカテゴリを変更")
+        
+        categories = self.db.get_all_categories()
+        for cat in categories:
+            action = change_category_menu.addAction(cat["name"])
+            action.triggered.connect(lambda checked, a=app_name, c=cat: self._change_app_category(a, c))
+        
+        menu.exec(self.app_table.viewport().mapToGlobal(position))
+    
+    def _change_app_category(self, app_name: str, category: Dict) -> None:
+        """アプリのカテゴリを変更し、ルールを登録"""
+        # 確認ダイアログ
+        reply = QMessageBox.question(
+            self, "カテゴリ変更とルール登録",
+            f"「{app_name}」を「{category['name']}」カテゴリに変更しますか？\n\n"
+            f"今後このアプリを自動的に「{category['name']}」として分類するルールも登録されます。",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                # ルールを追加（既存のルールと重複しないようチェック）
+                existing_rules = self.db.get_all_rules()
+                rule_exists = any(
+                    rule["match_target"] == "app_name" and 
+                    rule["pattern"].lower() == app_name.lower()
+                    for rule in existing_rules
+                )
+                
+                if not rule_exists:
+                    self.db.add_rule(
+                        match_target="app_name",
+                        pattern=app_name,
+                        category_id=category["id"],
+                        is_regex=False,
+                        priority=10
+                    )
+                    
+                    # 過去のイベントも再分類するか確認
+                    reclassify_reply = QMessageBox.question(
+                        self, "過去のイベントを再分類",
+                        f"ルールを登録しました。\n\n"
+                        f"過去の「{app_name}」のイベントも「{category['name']}」に再分類しますか？",
+                        QMessageBox.Yes | QMessageBox.No
+                    )
+                    
+                    if reclassify_reply == QMessageBox.Yes:
+                        # 全期間のイベントを再分類
+                        count = self.db.reclassify_events()
+                        QMessageBox.information(
+                            self, "完了",
+                            f"{count}件のイベントを再分類しました。\n"
+                            f"今後「{app_name}」は自動的に「{category['name']}」として分類されます。"
+                        )
+                    else:
+                        QMessageBox.information(
+                            self, "完了",
+                            f"ルールを登録しました。\n今後「{app_name}」は自動的に「{category['name']}」として分類されます。"
+                        )
+                else:
+                    QMessageBox.information(
+                        self, "情報",
+                        f"「{app_name}」のルールは既に存在します。\n設定タブから編集できます。"
+                    )
+                
+                # データを再読み込み
+                self._load_data()
+                
+            except Exception as e:
+                QMessageBox.critical(self, "エラー", f"ルール登録に失敗しました: {e}")
