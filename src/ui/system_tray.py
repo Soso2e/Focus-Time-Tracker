@@ -1,9 +1,9 @@
 """
 システムトレイアイコン
 """
-from PySide6.QtWidgets import QSystemTrayIcon, QMenu
-from PySide6.QtGui import QIcon, QAction
-from PySide6.QtCore import QSize
+from PySide6.QtWidgets import QSystemTrayIcon, QMenu, QApplication, QStyle
+from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter
+from PySide6.QtCore import QSize, Qt
 import sys
 
 
@@ -11,8 +11,9 @@ class SystemTray(QSystemTrayIcon):
     """システムトレイアイコン"""
     
     def __init__(self, main_window, app):
-        # アイコンを作成(簡易的にデフォルトアイコンを使用)
-        super().__init__()
+        # アイコンを作成
+        icon = self._create_icon()
+        super().__init__(icon)
         
         self.main_window = main_window
         self.app = app
@@ -48,6 +49,24 @@ class SystemTray(QSystemTrayIcon):
         self.activated.connect(self.on_activated)
         
         self.is_paused = False
+    
+    def _create_icon(self):
+        """システムトレイ用のアイコンを作成"""
+        # 簡易的なアイコンを作成(16x16の円)
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(Qt.transparent)
+        
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # 青い円を描画
+        painter.setBrush(Qt.blue)
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(2, 2, 12, 12)
+        
+        painter.end()
+        
+        return QIcon(pixmap)
     
     def on_activated(self, reason):
         """トレイアイコンクリック時"""

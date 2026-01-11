@@ -125,6 +125,7 @@ class FocusTrackerApp:
         
         # メインウィンドウ
         self.main_window = MainWindow(self.db)
+        self.main_window.show()  # 起動時にウィンドウを表示
         
         # システムトレイ
         self.system_tray = SystemTray(self.main_window, self)

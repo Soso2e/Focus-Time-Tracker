@@ -124,22 +124,26 @@ class MainWindow(QMainWindow):
     
     def _load_data(self) -> None:
         """データを読み込んで表示"""
-        start_date, end_date = self._get_date_range()
-        
-        # イベント取得
-        events = self.db.get_events_by_date_range(start_date, end_date)
-        
-        # セッション取得
-        sessions = self.db.get_sessions_by_date_range(start_date, end_date)
-        
-        # カテゴリ情報取得
-        categories = {cat["id"]: cat for cat in self.db.get_all_categories()}
-        
-        # 統計計算
-        self._update_summary(events, sessions)
-        self._update_category_table(events, sessions, categories)
-        self._update_app_table(events, categories)
-        self._update_session_table(sessions, categories)
+        try:
+            start_date, end_date = self._get_date_range()
+            
+            # イベント取得
+            events = self.db.get_events_by_date_range(start_date, end_date)
+            
+            # セッション取得
+            sessions = self.db.get_sessions_by_date_range(start_date, end_date)
+            
+            # カテゴリ情報取得
+            categories = {cat["id"]: cat for cat in self.db.get_all_categories()}
+            
+            # 統計計算
+            self._update_summary(events, sessions)
+            self._update_category_table(events, sessions, categories)
+            self._update_app_table(events, categories)
+            self._update_session_table(sessions, categories)
+        except Exception as e:
+            print(f"データ読み込みエラー: {e}")
+            # エラーが発生してもアプリケーションは継続
     
     def _update_summary(self, events: List[Dict], sessions: List[Dict]) -> None:
         """サマリーを更新"""
