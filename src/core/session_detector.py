@@ -20,6 +20,17 @@ class SessionDetector:
         self.db = db
         self.config = get_config()
         self.notification_manager = notification_manager
+        
+        # 進行中セッションの状態（リアルタイム追跡用）
+        self.active_session = {
+            "app_name": None,
+            "category_id": None,
+            "start_time": None,
+            "accumulated_seconds": 0,
+            "last_event_end": None,
+            "notified_milestones": set(),  # 通知済みの節目 (10, 20, 30...)
+            "db_session_id": None  # DB保存済みセッションID
+        }
     
     def detect_sessions(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -92,6 +103,122 @@ class SessionDetector:
                 sessions.append(session)
         
         return sessions
+    
+    def on_event_change(self, app_name: str, category_id: int, is_afk: bool, 
+                        event_start: datetime, event_end: datetime) -> None:
+        """
+        イベント変更時にセッション状態を更新（リアルタイム追跡）
+        
+        Args:
+            app_name: アプリ名
+            category_id: カテゴリID
+            is_afk: AFK状態かどうか
+            event_start: イベント開始時刻
+            event_end: イベント終了時刻
+        """
+        if is_afk:
+            # AFK時は現在のセッションを確定
+            self._finalize_active_session()
+            return
+        
+        session_threshold = self.config.get("session_threshold", 10) * 60  # 秒
+        
+        # 同じアプリの継続
+        if self.active_session["app_name"] == app_name:
+            # 時間を加算
+            duration = (event_end - event_start).total_seconds()
+            self.active_session["accumulated_seconds"] += duration
+            self.active_session["last_event_end"] = event_end
+            
+            # 閾値チェック & 通知
+            current_minutes = int(self.active_session["accumulated_seconds"] / 60)
+            milestone = (current_minutes // 10) * 10  # 10分単位
+            
+            if current_minutes >= 10 and milestone not in self.active_session["notified_milestones"]:
+                # 新しい節目に到達
+                self.active_session["notified_milestones"].add(milestone)
+                self._save_or_update_active_session()
+                self._send_notification(milestone)  # milestone値を通知（10, 20, 30...）
+        else:
+            # 異なるアプリ → 前のセッションを確定
+            self._finalize_active_session()
+            
+            # 新しいセッション開始
+            duration = (event_end - event_start).total_seconds()
+            self.active_session = {
+                "app_name": app_name,
+                "category_id": category_id,
+                "start_time": event_start,
+                "accumulated_seconds": duration,
+                "last_event_end": event_end,
+                "notified_milestones": set(),
+                "db_session_id": None
+            }
+    
+    def _finalize_active_session(self) -> None:
+        """現在のセッションを確定してDB保存"""
+        if not self.active_session["app_name"]:
+            return
+        
+        session_threshold = self.config.get("session_threshold", 10) * 60
+        if self.active_session["accumulated_seconds"] >= session_threshold:
+            self._save_or_update_active_session()
+        
+        # セッションリセット
+        self.active_session = {
+            "app_name": None,
+            "category_id": None,
+            "start_time": None,
+            "accumulated_seconds": 0,
+            "last_event_end": None,
+            "notified_milestones": set(),
+            "db_session_id": None
+        }
+    
+    def _save_or_update_active_session(self) -> None:
+        """進行中セッションをDBに保存または更新"""
+        if not self.active_session["app_name"]:
+            return
+        
+        duration_minutes = int(self.active_session["accumulated_seconds"] / 60)
+        
+        if self.active_session["db_session_id"]:
+            # 既存セッションを更新
+            self.db.update_session(
+                session_id=self.active_session["db_session_id"],
+                end_at=self.active_session["last_event_end"],
+                duration_minutes=duration_minutes,
+                event_count=1  # イベント数は簡略化
+            )
+            print(f"[セッション] 更新: ID={self.active_session['db_session_id']}, {duration_minutes}分")
+        else:
+            # 新規セッションを保存
+            session_id = self.db.add_session(
+                start_at=self.active_session["start_time"],
+                end_at=self.active_session["last_event_end"],
+                category_id=self.active_session["category_id"],
+                duration_minutes=duration_minutes,
+                event_count=1,
+                main_app_name=self.active_session["app_name"]
+            )
+            self.active_session["db_session_id"] = session_id
+            print(f"[セッション] 新規保存: ID={session_id}, {duration_minutes}分")
+    
+    def _send_notification(self, duration_minutes: int) -> None:
+        """セッション達成通知を送信"""
+        if not self.notification_manager:
+            return
+        
+        category = self.db.get_category_by_id(self.active_session["category_id"])
+        category_name = category.get("name", "不明") if category else "不明"
+        
+        print(f"[セッション] 通知送信: {duration_minutes}分達成 ({self.active_session['app_name']})")
+        
+        self.notification_manager.notify_session_complete(
+            duration_minutes=duration_minutes,
+            category_name=category_name,
+            main_app=self.active_session["app_name"]
+        )
     
     def _is_interruption_allowed(self, event: Dict[str, Any], max_duration: int) -> bool:
         """
@@ -239,51 +366,90 @@ class SessionDetector:
         sessions = self.detect_sessions(events)
         
         # 既存のセッションを取得（重複チェック用）
+        # キー: (start_at, main_app_name) -> session_data
         existing_sessions = self.db.get_sessions_by_date_range(start_time, end_time)
-        existing_session_times = {
-            (s.get("start_at"), s.get("end_at")) for s in existing_sessions
-        }
+        existing_session_map = {}
+        for s in existing_sessions:
+            start_at = s.get("start_at")
+            if isinstance(start_at, str):
+                start_at = datetime.fromisoformat(start_at)
+            
+            # 秒未満を切り捨てて比較用にする
+            start_key = start_at.replace(microsecond=0)
+            app_name = s.get("main_app_name")
+            existing_session_map[(start_key, app_name)] = s
         
         saved_count = 0
         for session in sessions:
             try:
                 # 閾値チェック（念のため）
                 if session["duration_minutes"] < 1:
-                    print(f"[セッション] スキップ: 継続時間が短すぎます ({session['duration_minutes']}分)")
                     continue
                 
-                # 重複チェック
-                session_key = (session["start_at"], session["end_at"])
-                if session_key in existing_session_times:
-                    continue  # 既に保存済み
+                # 重複チェックキー作成
+                s_start = session["start_at"]
+                if isinstance(s_start, str):
+                    s_start = datetime.fromisoformat(s_start)
+                s_start_key = s_start.replace(microsecond=0)
+                s_app_name = session.get("main_app_name")
                 
-                self.db.add_session(
-                    start_at=session["start_at"],
-                    end_at=session["end_at"],
-                    category_id=session["category_id"],
-                    duration_minutes=session["duration_minutes"],
-                    event_count=session["event_count"],
-                    main_app_name=session.get("main_app_name")
-                )
-                saved_count += 1
+                session_key = (s_start_key, s_app_name)
                 
-                print(f"[セッション] 新しいセッションを保存: {session['duration_minutes']}分 / {session.get('main_app_name', '不明')}")
+                # 通知を送るかどうか
+                should_notify = False
                 
-                # 通知を送信
-                if self.notification_manager:
-                    # カテゴリ名を取得
+                if session_key in existing_session_map:
+                    # 既存セッションを更新
+                    existing = existing_session_map[session_key]
+                    existing_id = existing["id"]
+                    old_duration = existing["duration_minutes"]
+                    new_duration = session["duration_minutes"]
+                    
+                    # 時間が変わっていれば更新
+                    if new_duration != old_duration:
+                        self.db.update_session(
+                            session_id=existing_id,
+                            end_at=session["end_at"],
+                            duration_minutes=new_duration,
+                            event_count=session["event_count"]
+                        )
+                        print(f"[セッション] 更新: ID={existing_id}, {old_duration}分 -> {new_duration}分")
+                        
+                        # 通知判定: 10分の節目をまたいだか？
+                        # 例: 10分 -> 20分 (OK), 12分 -> 15分 (NG), 9分 -> 10分 (OK)
+                        if (new_duration // 10) > (old_duration // 10):
+                            should_notify = True
+                else:
+                    # 新規セッションを保存
+                    new_id = self.db.add_session(
+                        start_at=session["start_at"],
+                        end_at=session["end_at"],
+                        category_id=session["category_id"],
+                        duration_minutes=session["duration_minutes"],
+                        event_count=session["event_count"],
+                        main_app_name=session.get("main_app_name")
+                    )
+                    saved_count += 1
+                    print(f"[セッション] 新規保存: ID={new_id}, {session['duration_minutes']}分")
+                    
+                    # 新規作成時は常に通知（ただし閾値以上の場合）
+                    session_threshold = self.config.get("session_threshold", 10)
+                    if session["duration_minutes"] >= session_threshold:
+                        should_notify = True
+                
+                # 通知処理
+                if should_notify and self.notification_manager:
                     category = self.db.get_category_by_id(session["category_id"])
                     category_name = category.get("name", "不明") if category else "不明"
                     
-                    print(f"[セッション] 通知を送信: {category_name} / {session.get('main_app_name', '不明')}")
+                    print(f"[セッション] 通知送信: {session['duration_minutes']}分達成 ({s_app_name})")
                     
                     self.notification_manager.notify_session_complete(
                         duration_minutes=session["duration_minutes"],
                         category_name=category_name,
                         main_app=session.get("main_app_name", "不明")
                     )
-                else:
-                    print("[セッション] 通知マネージャーが設定されていません")
+                    
             except Exception as e:
                 print(f"セッション保存エラー: {e}")
         

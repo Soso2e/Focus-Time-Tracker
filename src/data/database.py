@@ -273,38 +273,22 @@ class Database:
         """
         アプリ情報からカテゴリIDを判定
         
-        優先順位:
-        1. ファイル拡張子チェック（最優先）
-        2. プロセス名（ウィンドウタイトルの最初の部分）のルール
-        3. アプリ名（実行ファイル名）のルール
+        優先順位（FIXED）:
+        1. 高優先度ルール（priority >= 10）- アプリ名とプロセス名
+        2. ファイル拡張子チェック（エディタ/ブラウザのみ）
+        3. 通常優先度ルール（priority < 10）
         4. ウィンドウタイトル全体のルール
         """
-        # コーディング関連のファイル拡張子リスト
-        coding_extensions = [
-            '.py', '.txt', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', '.hpp',
-            '.cs', '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.html', '.css', '.scss',
-            '.sass', '.less', '.json', '.xml', '.yaml', '.yml', '.md', '.sql', '.sh', '.bash',
-            '.bat', '.ps1', '.r', '.m', '.scala', '.pl', '.lua', '.vim', '.ini', '.cfg',
-            '.conf', '.toml', '.dart', '.vue', '.svelte', '.astro'
-        ]
-        
-        # 1. ウィンドウタイトルにコーディング関連の拡張子が含まれているかチェック（最優先）
-        if window_title:
-            window_title_lower = window_title.lower()
-            for ext in coding_extensions:
-                if ext in window_title_lower:
-                    # 「コーディング」カテゴリを取得
-                    coding_category = self.get_category_by_name("コーディング")
-                    if coding_category:
-                        return coding_category["id"]
-                    break
-        
         # ルールを取得
         rules = self.get_all_rules()
         
-        # 2. プロセス名（ウィンドウタイトルの最初の部分）のルールをチェック（高優先度）
+        # 高優先度ルールと通常優先度ルールに分離
+        high_priority_rules = [r for r in rules if r["priority"] >= 10]
+        normal_priority_rules = [r for r in rules if r["priority"] < 10]
+        
+        # 1. 高優先度プロセス名ルール
         if process_name:
-            for rule in rules:
+            for rule in high_priority_rules:
                 if rule["match_target"] == "process":
                     if rule["is_regex"]:
                         if re.search(rule["pattern"], process_name, re.IGNORECASE):
@@ -313,9 +297,9 @@ class Database:
                         if rule["pattern"].lower() in process_name.lower():
                             return rule["category_id"]
         
-        # 3. アプリ名（実行ファイル名）のルールをチェック（通常優先度）
+        # 2. 高優先度アプリ名ルール（Maya, Blenderなど）
         if app_name:
-            for rule in rules:
+            for rule in high_priority_rules:
                 if rule["match_target"] == "app_name":
                     if rule["is_regex"]:
                         if re.search(rule["pattern"], app_name, re.IGNORECASE):
@@ -324,7 +308,64 @@ class Database:
                         if rule["pattern"].lower() in app_name.lower():
                             return rule["category_id"]
         
-        # 4. ウィンドウタイトル全体のルールをチェック（低優先度）
+        # 3. ファイル拡張子チェック（エディタ/ブラウザ/ターミナルのみ対象）
+        # Note: 3Dソフトなどの明確なアプリは上記でマッチ済み
+        if window_title and app_name:
+            # エディタ/IDE系のアプリのみ拡張子チェックを適用
+            editor_apps = [
+                "code", "visual studio", "pycharm", "intellij", "sublime", "atom",
+                "notepad", "vim", "emacs", "vscode", "antigravity", "cursor"
+            ]
+            # ブラウザ系（タイトルにURLや拡張子が含まれる可能性）
+            browser_apps = ["chrome", "firefox", "safari", "edge", "brave", "arc"]
+            # ターミナル系
+            terminal_apps = ["windowsterminal", "powershell", "cmd", "terminal"]
+            
+            app_name_lower = app_name.lower()
+            is_editor_or_browser = any(app in app_name_lower for app in editor_apps + browser_apps + terminal_apps)
+            
+            if is_editor_or_browser:
+                # コーディング関連のファイル拡張子リスト
+                coding_extensions = [
+                    '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', '.hpp',
+                    '.cs', '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.html', '.css', '.scss',
+                    '.sass', '.less', '.json', '.xml', '.yaml', '.yml', '.md', '.sql', '.sh', '.bash',
+                    '.bat', '.ps1', '.r', '.m', '.scala', '.pl', '.lua', '.vim', '.ini', '.cfg',
+                    '.conf', '.toml', '.dart', '.vue', '.svelte', '.astro', '.txt'
+                ]
+                
+                window_title_lower = window_title.lower()
+                for ext in coding_extensions:
+                    if ext in window_title_lower:
+                        # 「コーディング」カテゴリを取得
+                        coding_category = self.get_category_by_name("コーディング")
+                        if coding_category:
+                            return coding_category["id"]
+                        break
+        
+        # 4. 通常優先度プロセス名ルール
+        if process_name:
+            for rule in normal_priority_rules:
+                if rule["match_target"] == "process":
+                    if rule["is_regex"]:
+                        if re.search(rule["pattern"], process_name, re.IGNORECASE):
+                            return rule["category_id"]
+                    else:
+                        if rule["pattern"].lower() in process_name.lower():
+                            return rule["category_id"]
+        
+        # 5. 通常優先度アプリ名ルール
+        if app_name:
+            for rule in normal_priority_rules:
+                if rule["match_target"] == "app_name":
+                    if rule["is_regex"]:
+                        if re.search(rule["pattern"], app_name, re.IGNORECASE):
+                            return rule["category_id"]
+                    else:
+                        if rule["pattern"].lower() in app_name.lower():
+                            return rule["category_id"]
+        
+        # 6. ウィンドウタイトル全体のルールをチェック（最低優先度）
         if window_title:
             for rule in rules:
                 if rule["match_target"] == "title":
@@ -338,6 +379,7 @@ class Database:
         # マッチしない場合は「未分類」カテゴリ
         uncategorized = self.get_category_by_name("未分類")
         return uncategorized["id"] if uncategorized else None
+
     
     # イベント関連
     def add_event(self, app_name: str, process_name: str = None, window_title: str = None,
@@ -367,6 +409,13 @@ class Database:
         """最新のイベントを取得"""
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM events ORDER BY id DESC LIMIT 1")
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    
+    def get_event_by_id(self, event_id: int) -> Optional[Dict[str, Any]]:
+        """IDでイベントを取得"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM events WHERE id = ?", (event_id,))
         row = cursor.fetchone()
         return dict(row) if row else None
     
@@ -442,6 +491,17 @@ class Database:
         )
         self.conn.commit()
         return cursor.lastrowid
+    
+    def update_session(self, session_id: int, end_at: datetime, duration_minutes: int, event_count: int) -> None:
+        """集中セッションを更新"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """UPDATE sessions 
+               SET end_at = ?, duration_minutes = ?, event_count = ?
+               WHERE id = ?""",
+            (end_at, duration_minutes, event_count, session_id)
+        )
+        self.conn.commit()
     
     def get_sessions_by_date_range(self, start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
         """日付範囲でセッションを取得"""

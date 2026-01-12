@@ -47,11 +47,6 @@ class FocusTrackerApp:
             threshold_seconds=self.config.get("afk_threshold", 300),
             resource_monitor=self.resource_monitor
         )
-        self.event_collector = EventCollector(self.db)
-        self.window_monitor = WindowMonitor(
-            interval=self.config.get("monitor_interval", 3),
-            callback=self._on_window_change
-        )
         
         # データ処理コンポーネント
         self.glue_engine = GlueEngine(self.db)
@@ -62,6 +57,14 @@ class FocusTrackerApp:
         # セッション検出器（通知マネージャーを渡す）
         self.session_detector = SessionDetector(self.db, self.notification_manager)
         
+        # イベント収集器（セッション検出器を渡す）
+        self.event_collector = EventCollector(self.db, self.session_detector)
+        
+        self.window_monitor = WindowMonitor(
+            interval=self.config.get("monitor_interval", 3),
+            callback=self._on_window_change
+        )
+        
         # UI
         self.qt_app = None
         self.main_window = None
@@ -69,7 +72,7 @@ class FocusTrackerApp:
         
         # 定期処理用タイマー
         self.glue_timer = None
-        self.session_timer = None
+        # Note: session_timerは削除（リアルタイム追跡に移行）
         
         # AFK状態の追跡
         self.was_afk = False
@@ -80,7 +83,7 @@ class FocusTrackerApp:
         self.event_collector.on_window_change(window_info, self.was_afk)
     
     def _check_afk_status(self) -> None:
-        """AFK状態をチェックして通知"""
+        """AFK状態をチェックして記録"""
         is_afk = self.afk_detector.is_afk()
         idle_time = self.afk_detector.get_idle_time()
         
@@ -92,8 +95,24 @@ class FocusTrackerApp:
         if is_afk and not self.was_afk:
             print(f"AFK開始を検出 (アイドル時間: {idle_time:.1f}秒)")
             self.notification_manager.notify_afk_start()
+            # 現在のイベントのAFK状態を更新
+            self.event_collector.update_current_event_afk_status(True)
+        
+        # AFK復帰時
+        if not is_afk and self.was_afk:
+            # 現在のイベントのAFK状態を更新（アクティブに戻す）
+            self.event_collector.update_current_event_afk_status(False)
+        
+        # アクティブ時は現在のイベントの終了時刻を更新（リアルタイム反映のため）
+        if not is_afk:
+            self.event_collector.update_current_event_end_time()
         
         self.was_afk = is_afk
+        
+        # UI更新（ステータスバーの時間を更新するため）
+        # UI更新（ステータスバーの時間を更新するため）
+        if self.main_window:
+            self.main_window.update_status()
     
     def _process_glue_and_sessions(self) -> None:
         """定期的にGlueとセッション検出を実行"""
@@ -101,10 +120,11 @@ class FocusTrackerApp:
             # 最近24時間のイベントにGlueルールを適用
             self.glue_engine.process_recent_events(hours=24)
             
-            # セッション検出と保存
-            self.session_detector.process_and_save_sessions(hours=24)
+            # セッション検出と保存 - リアルタイム追跡に移行したため無効化
+            # self.session_detector.process_and_save_sessions(hours=24)
+            print("[情報] セッション検出はリアルタイム追跡で行われます")
         except Exception as e:
-            print(f"Glue/セッション処理エラー: {e}")
+            print(f"Glue処理エラー: {e}")
     
     def start_background_services(self) -> None:
         """バックグラウンドサービスを開始"""
@@ -155,7 +175,7 @@ class FocusTrackerApp:
         self.qt_app.setApplicationName("集中時間トラッカー")
         
         # メインウィンドウ
-        self.main_window = MainWindow(self.db, self.afk_detector)
+        self.main_window = MainWindow(self.db, self.afk_detector, self.session_detector)
         self.main_window.show()  # 起動時にウィンドウを表示
         
         # システムトレイ

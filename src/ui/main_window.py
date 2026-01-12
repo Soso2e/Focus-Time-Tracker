@@ -19,21 +19,26 @@ from .category_rule_widget import CategoryRuleWidget
 class MainWindow(QMainWindow):
     """メインウィンドウ(ダッシュボード)"""
     
-    def __init__(self, db: Database, afk_detector=None):
+    def __init__(self, db: Database, afk_detector=None, session_detector=None):
         super().__init__()
         self.db = db
         self.afk_detector = afk_detector
+        self.session_detector = session_detector
+        
         self.current_period = "today"  # today, week, month
         
         self.setWindowTitle("集中時間トラッカー")
-        self.setMinimumSize(900, 600)
+        self.setMinimumSize(1200, 700)
         
+        # UI構築
         self._setup_ui()
+        
+        # データ読み込み
         self._load_data()
         
-        # 定期更新タイマー(30秒ごと)
-        self.update_timer = QTimer()
-        self.update_timer.timeout.connect(self._load_data)
+        # ステータスバー更新タイマー（30秒ごと）
+        self.update_timer = QTimer(self) # Changed from self.status_timer to self.update_timer
+        self.update_timer.timeout.connect(self._load_data) # Changed from _update_status to _load_data
         self.update_timer.start(30000)
         
         # ステータス更新タイマー(1秒ごと)
@@ -125,8 +130,8 @@ class MainWindow(QMainWindow):
         
         # セッションタブ
         self.session_table = QTableWidget()
-        self.session_table.setColumnCount(5)
-        self.session_table.setHorizontalHeaderLabels(["開始時刻", "終了時刻", "時間", "カテゴリ", "メインアプリ"])
+        self.session_table.setColumnCount(6)
+        self.session_table.setHorizontalHeaderLabels(["開始時刻", "終了時刻", "時間", "カウント", "カテゴリ", "メインアプリ"])
         self.session_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         tabs.addTab(self.session_table, "集中セッション")
         
@@ -229,6 +234,10 @@ class MainWindow(QMainWindow):
         """サマリーを更新"""
         total_time = 0
         for event in events:
+            # AFK イベントは作業時間から除外
+            if event.get("is_afk", False):
+                continue
+            
             if event.get("start_at") and event.get("end_at"):
                 start = datetime.fromisoformat(event["start_at"]) if isinstance(event["start_at"], str) else event["start_at"]
                 end = datetime.fromisoformat(event["end_at"]) if isinstance(event["end_at"], str) else event["end_at"]
@@ -237,11 +246,12 @@ class MainWindow(QMainWindow):
         hours = int(total_time / 3600)
         minutes = int((total_time % 3600) / 60)
         
-        session_count = len(sessions)
+        # セッションカウントを10分マイルストーン数に変更
+        milestone_count = sum(session.get("duration_minutes", 0) // 10 for session in sessions)
         
         period_text = {"today": "今日", "week": "今週", "month": "今月"}[self.current_period]
         
-        summary = f"⏱️ {period_text}の作業時間: {hours}時間{minutes}分 | 🎯 集中セッション: {session_count}回"
+        summary = f"⏱️ {period_text}の作業時間: {hours}時間{minutes}分 | 🎯 集中セッション: {milestone_count}回"
         self.summary_label.setText(summary)
     
     def _update_category_table(self, events: List[Dict], sessions: List[Dict], categories: Dict) -> None:
@@ -251,6 +261,10 @@ class MainWindow(QMainWindow):
         total_time = 0
         
         for event in events:
+            # AFK イベントは統計から除外
+            if event.get("is_afk", False):
+                continue
+            
             if not event.get("start_at") or not event.get("end_at"):
                 continue
             
@@ -264,11 +278,12 @@ class MainWindow(QMainWindow):
                 category_stats[cat_id] = {"time": 0, "sessions": 0}
             category_stats[cat_id]["time"] += duration
         
-        # セッション数をカウント
+        # セッション数をカウント（マイルストーン数）
         for session in sessions:
             cat_id = session.get("category_id")
             if cat_id in category_stats:
-                category_stats[cat_id]["sessions"] += 1
+                milestone_count = session.get("duration_minutes", 0) // 10
+                category_stats[cat_id]["sessions"] += milestone_count
         
         # テーブル更新
         self.category_table.setRowCount(len(category_stats))
@@ -382,6 +397,10 @@ class MainWindow(QMainWindow):
         app_stats = {}
         
         for event in events:
+            # AFK イベントは統計から除外
+            if event.get("is_afk", False):
+                continue
+            
             if not event.get("start_at") or not event.get("end_at"):
                 continue
             
@@ -649,6 +668,12 @@ class MainWindow(QMainWindow):
             time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
             self.session_table.setItem(row, 2, QTableWidgetItem(time_str))
             
+            # カウント（10分マイルストーン数）
+            milestone_count = duration_min // 10
+            count_item = QTableWidgetItem(f"{milestone_count}回")
+            count_item.setTextAlignment(Qt.AlignCenter)
+            self.session_table.setItem(row, 3, count_item)
+            
             # カテゴリ（色付き）
             cat = categories.get(session.get("category_id"), {"name": "不明", "color": "#CCCCCC"})
             cat_item = QTableWidgetItem(cat["name"])
@@ -663,11 +688,11 @@ class MainWindow(QMainWindow):
                 else:
                     cat_item.setForeground(QColor("#000000"))
             
-            self.session_table.setItem(row, 3, cat_item)
+            self.session_table.setItem(row, 4, cat_item)
             
             # メインアプリ
             main_app = session.get("main_app_name", "不明")
-            self.session_table.setItem(row, 4, QTableWidgetItem(main_app))
+            self.session_table.setItem(row, 5, QTableWidgetItem(main_app))
     
     def _show_app_context_menu(self, position) -> None:
         """アプリ別テーブルのコンテキストメニューを表示"""
@@ -796,6 +821,10 @@ class MainWindow(QMainWindow):
                 "設定を保存しました。\n一部の設定はアプリ再起動後に反映されます。"
             )
     
+    def update_status(self) -> None:
+        """ステータスバーを更新（外部呼び出し用）"""
+        self._update_status()
+    
     def _update_status(self) -> None:
         """ステータスバーを更新"""
         if not self.afk_detector:
@@ -865,10 +894,21 @@ class MainWindow(QMainWindow):
                         border-radius: 3px;
                     """)
             
-            # セッション進捗（同じアプリの連続イベントの合計時間）
+            # セッション進捗（SessionDetectorから直接取得）
             session_threshold = config.get("session_threshold", 10)
             
-            if latest_event and not latest_event.get("is_afk"):
+            if self.session_detector and self.session_detector.active_session["app_name"]:
+                # リアルタイムセッション状態から取得
+                session_minutes = int(self.session_detector.active_session["accumulated_seconds"] / 60)
+                
+                if session_minutes >= session_threshold:
+                    self.session_progress_label.setText(f"達成 ({session_minutes}分)")
+                    self.session_progress_label.setStyleSheet("color: green; font-weight: bold;")
+                else:
+                    self.session_progress_label.setText(f"{session_minutes}/{session_threshold}分")
+                    self.session_progress_label.setStyleSheet("")
+            elif latest_event and not latest_event.get("is_afk"):
+                # SessionDetectorがない場合のフォールバック（DBスキャン）
                 from datetime import datetime, timedelta
                 
                 # 現在のアプリ名
