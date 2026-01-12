@@ -13,6 +13,22 @@ except ImportError:
     mouse = None
     print("警告: pynputがインストールされていません")
 
+# Windows APIフォールバック
+try:
+    import ctypes
+    from ctypes import Structure, windll, c_uint, sizeof, byref
+    
+    class LASTINPUTINFO(Structure):
+        _fields_ = [
+            ('cbSize', c_uint),
+            ('dwTime', c_uint),
+        ]
+    
+    WINDOWS_API_AVAILABLE = True
+except ImportError:
+    WINDOWS_API_AVAILABLE = False
+    print("警告: Windows APIが利用できません")
+
 from .resource_monitor import ResourceMonitor
 
 
@@ -31,6 +47,27 @@ class AFKDetector:
         self.running = False
         self.keyboard_listener: Optional[keyboard.Listener] = None
         self.mouse_listener: Optional[mouse.Listener] = None
+        self.use_windows_api = WINDOWS_API_AVAILABLE and (keyboard is None or mouse is None)
+    
+    def _get_windows_idle_time(self) -> float:
+        """
+        Windows APIを使用してアイドル時間を取得
+        
+        Returns:
+            アイドル時間(秒)
+        """
+        if not WINDOWS_API_AVAILABLE:
+            return 0.0
+        
+        try:
+            lastInputInfo = LASTINPUTINFO()
+            lastInputInfo.cbSize = sizeof(lastInputInfo)
+            windll.user32.GetLastInputInfo(byref(lastInputInfo))
+            millis = windll.kernel32.GetTickCount() - lastInputInfo.dwTime
+            return millis / 1000.0
+        except Exception as e:
+            print(f"Windows API エラー: {e}")
+            return 0.0
     
     def _on_activity(self) -> None:
         """入力アクティビティ発生時のコールバック"""
@@ -60,6 +97,11 @@ class AFKDetector:
         Returns:
             最終アクティビティからの経過時間(秒)
         """
+        # Windows APIが利用可能な場合はそちらを優先
+        if self.use_windows_api:
+            return self._get_windows_idle_time()
+        
+        # pynputベースのアイドル時間
         return (datetime.now() - self.last_activity).total_seconds()
     
     def is_afk(self) -> bool:
@@ -90,12 +132,23 @@ class AFKDetector:
             print("既に監視中です")
             return
         
-        if keyboard is None or mouse is None:
-            print("エラー: pynputがインストールされていません")
-            return
-        
         self.running = True
         self.last_activity = datetime.now()
+        
+        # Windows APIフォールバックを使用する場合
+        if self.use_windows_api:
+            print(f"AFK検知を開始しました (Windows API使用, しきい値: {self.threshold}秒)")
+            return
+        
+        # pynputが利用可能な場合
+        if keyboard is None or mouse is None:
+            print("警告: pynputがインストールされていません。Windows APIフォールバックを使用します。")
+            self.use_windows_api = WINDOWS_API_AVAILABLE
+            if self.use_windows_api:
+                print(f"AFK検知を開始しました (Windows API使用, しきい値: {self.threshold}秒)")
+            else:
+                print("エラー: AFK検知を開始できません")
+            return
         
         # キーボードリスナー
         self.keyboard_listener = keyboard.Listener(
@@ -111,7 +164,7 @@ class AFKDetector:
         )
         self.mouse_listener.start()
         
-        print(f"AFK検知を開始しました(しきい値: {self.threshold}秒)")
+        print(f"AFK検知を開始しました (pynput使用, しきい値: {self.threshold}秒)")
     
     def stop(self) -> None:
         """入力監視を停止"""

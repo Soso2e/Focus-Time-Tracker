@@ -90,3 +90,17 @@ def get_config() -> Config:
     if _config_instance is None:
         _config_instance = Config()
     return _config_instance
+
+
+def save_config(config_dict: Dict[str, Any]) -> None:
+    """設定を保存"""
+    config = get_config()
+    for key, value in config_dict.items():
+        config.set(key, value)
+
+
+def reload_config() -> Config:
+    """設定を再読み込み"""
+    global _config_instance
+    _config_instance = None
+    return get_config()

@@ -3,3 +3,5 @@ pynput>=1.7.6
 psutil>=5.9.0
 PySide6>=6.6.0
 PySide6-Addons>=6.6.0
+pywin32>=306
+plyer>=2.1.0

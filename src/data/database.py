@@ -92,10 +92,29 @@ class Database:
                 category_id INTEGER,
                 duration_minutes INTEGER,
                 event_count INTEGER,
+                main_app_name TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (category_id) REFERENCES categories(id)
             )
         """)
+        
+        # インデックス作成（パフォーマンス最適化）
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_start_at ON events(start_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_category_id ON events(category_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_app_name ON events(app_name)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_start_at ON sessions(start_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_category_id ON sessions(category_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rules_category_id ON rules(category_id)")
+        
+        # 既存のsessionsテーブルにmain_app_nameカラムがない場合は追加（マイグレーション）
+        cursor.execute("PRAGMA table_info(sessions)")
+        columns = [column[1] for column in cursor.fetchall()]
+        if 'main_app_name' not in columns:
+            try:
+                cursor.execute("ALTER TABLE sessions ADD COLUMN main_app_name TEXT")
+                print("sessionsテーブルにmain_app_nameカラムを追加しました")
+            except Exception as e:
+                print(f"カラム追加エラー: {e}")
         
         self.conn.commit()
         
@@ -251,7 +270,15 @@ class Database:
         return [dict(row) for row in cursor.fetchall()]
     
     def match_category(self, app_name: str, process_name: str = None, window_title: str = None) -> Optional[int]:
-        """アプリ情報からカテゴリIDを判定"""
+        """
+        アプリ情報からカテゴリIDを判定
+        
+        優先順位:
+        1. ファイル拡張子チェック（最優先）
+        2. プロセス名（ウィンドウタイトルの最初の部分）のルール
+        3. アプリ名（実行ファイル名）のルール
+        4. ウィンドウタイトル全体のルール
+        """
         # コーディング関連のファイル拡張子リスト
         coding_extensions = [
             '.py', '.txt', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.h', '.hpp',
@@ -261,7 +288,7 @@ class Database:
             '.conf', '.toml', '.dart', '.vue', '.svelte', '.astro'
         ]
         
-        # ウィンドウタイトルにコーディング関連の拡張子が含まれているかチェック
+        # 1. ウィンドウタイトルにコーディング関連の拡張子が含まれているかチェック（最優先）
         if window_title:
             window_title_lower = window_title.lower()
             for ext in coding_extensions:
@@ -272,27 +299,41 @@ class Database:
                         return coding_category["id"]
                     break
         
-        # 通常のルールマッチング
+        # ルールを取得
         rules = self.get_all_rules()
         
-        for rule in rules:
-            target_value = None
-            if rule["match_target"] == "app_name":
-                target_value = app_name
-            elif rule["match_target"] == "process" and process_name:
-                target_value = process_name
-            elif rule["match_target"] == "title" and window_title:
-                target_value = window_title
-            
-            if target_value:
-                if rule["is_regex"]:
-                    # 正規表現マッチ
-                    if re.search(rule["pattern"], target_value, re.IGNORECASE):
-                        return rule["category_id"]
-                else:
-                    # 部分一致
-                    if rule["pattern"].lower() in target_value.lower():
-                        return rule["category_id"]
+        # 2. プロセス名（ウィンドウタイトルの最初の部分）のルールをチェック（高優先度）
+        if process_name:
+            for rule in rules:
+                if rule["match_target"] == "process":
+                    if rule["is_regex"]:
+                        if re.search(rule["pattern"], process_name, re.IGNORECASE):
+                            return rule["category_id"]
+                    else:
+                        if rule["pattern"].lower() in process_name.lower():
+                            return rule["category_id"]
+        
+        # 3. アプリ名（実行ファイル名）のルールをチェック（通常優先度）
+        if app_name:
+            for rule in rules:
+                if rule["match_target"] == "app_name":
+                    if rule["is_regex"]:
+                        if re.search(rule["pattern"], app_name, re.IGNORECASE):
+                            return rule["category_id"]
+                    else:
+                        if rule["pattern"].lower() in app_name.lower():
+                            return rule["category_id"]
+        
+        # 4. ウィンドウタイトル全体のルールをチェック（低優先度）
+        if window_title:
+            for rule in rules:
+                if rule["match_target"] == "title":
+                    if rule["is_regex"]:
+                        if re.search(rule["pattern"], window_title, re.IGNORECASE):
+                            return rule["category_id"]
+                    else:
+                        if rule["pattern"].lower() in window_title.lower():
+                            return rule["category_id"]
         
         # マッチしない場合は「未分類」カテゴリ
         uncategorized = self.get_category_by_name("未分類")
@@ -391,13 +432,13 @@ class Database:
     
     # セッション関連
     def add_session(self, start_at: datetime, end_at: datetime, category_id: int,
-                    duration_minutes: int, event_count: int) -> int:
+                    duration_minutes: int, event_count: int, main_app_name: str = None) -> int:
         """集中セッションを追加"""
         cursor = self.conn.cursor()
         cursor.execute(
-            """INSERT INTO sessions (start_at, end_at, category_id, duration_minutes, event_count)
-               VALUES (?, ?, ?, ?, ?)""",
-            (start_at, end_at, category_id, duration_minutes, event_count)
+            """INSERT INTO sessions (start_at, end_at, category_id, duration_minutes, event_count, main_app_name)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (start_at, end_at, category_id, duration_minutes, event_count, main_app_name)
         )
         self.conn.commit()
         return cursor.lastrowid
@@ -410,3 +451,127 @@ class Database:
             (start_date, end_date)
         )
         return [dict(row) for row in cursor.fetchall()]
+    
+    # データ削除メソッド
+    
+    def delete_events_by_date_range(self, start_date: datetime, end_date: datetime) -> int:
+        """
+        期間指定でイベントを削除
+        
+        Args:
+            start_date: 開始日時
+            end_date: 終了日時
+        
+        Returns:
+            削除されたイベント数
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM events WHERE start_at >= ? AND start_at < ?",
+            (start_date, end_date)
+        )
+        self.conn.commit()
+        return cursor.rowcount
+    
+    def delete_sessions_by_date_range(self, start_date: datetime, end_date: datetime) -> int:
+        """
+        期間指定でセッションを削除
+        
+        Args:
+            start_date: 開始日時
+            end_date: 終了日時
+        
+        Returns:
+            削除されたセッション数
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM sessions WHERE start_at >= ? AND start_at < ?",
+            (start_date, end_date)
+        )
+        self.conn.commit()
+        return cursor.rowcount
+    
+    def delete_today_data(self) -> tuple[int, int]:
+        """
+        今日のデータ（イベントとセッション）を削除
+        
+        Returns:
+            (削除されたイベント数, 削除されたセッション数)
+        """
+        from datetime import datetime, timedelta
+        
+        # 今日の0時から明日の0時まで
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow_start = today_start + timedelta(days=1)
+        
+        events_deleted = self.delete_events_by_date_range(today_start, tomorrow_start)
+        sessions_deleted = self.delete_sessions_by_date_range(today_start, tomorrow_start)
+        
+        return (events_deleted, sessions_deleted)
+    
+    def delete_events_by_app_name(self, app_name: str) -> int:
+        """
+        アプリ名でイベントを削除
+        
+        Args:
+            app_name: アプリ名
+        
+        Returns:
+            削除されたイベント数
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM events WHERE app_name = ?",
+            (app_name,)
+        )
+        self.conn.commit()
+        return cursor.rowcount
+    
+    def delete_events_by_process_name(self, process_name: str) -> int:
+        """
+        プロセス名でイベントを削除
+        
+        Args:
+            process_name: プロセス名
+        
+        Returns:
+            削除されたイベント数
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM events WHERE process_name = ?",
+            (process_name,)
+        )
+        self.conn.commit()
+        return cursor.rowcount
+    
+    def delete_session_by_id(self, session_id: int) -> bool:
+        """
+        セッションIDでセッションを削除
+        
+        Args:
+            session_id: セッションID
+        
+        Returns:
+            削除成功したかどうか
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM sessions WHERE id = ?",
+            (session_id,)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+    
+    def delete_all_sessions(self) -> int:
+        """
+        全セッションを削除
+        
+        Returns:
+            削除されたセッション数
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM sessions")
+        self.conn.commit()
+        return cursor.rowcount

@@ -44,20 +44,57 @@ class WindowMonitor:
             return None
         
         try:
+            import psutil
+        except ImportError:
+            psutil = None
+            print("警告: psutilがインストールされていません。プロセス情報の取得が制限されます。")
+        
+        try:
             window = pwc.getActiveWindow()
             if window is None:
                 return None
             
-            # アプリ名を取得
-            app_name = window.title.split(" - ")[-1] if window.title else "Unknown"
-            
-            # プロセス名を取得(可能な場合)
+            # アプリ名とプロセス名を取得
+            app_name = None
             process_name = None
-            try:
-                # PyWinCtlではプロセス名の直接取得が難しいため、タイトルから推測
+            exe_name = None
+            
+            if psutil:
+                try:
+                    # ウィンドウからプロセスIDを取得
+                    if hasattr(window, '_hWnd'):
+                        import win32process
+                        import win32gui
+                        _, pid = win32process.GetWindowThreadProcessId(window._hWnd)
+                        
+                        # プロセス情報を取得
+                        process = psutil.Process(pid)
+                        exe_name = process.name()  # 例: "Notion.exe"
+                        
+                        # アプリ名: 実行ファイル名から拡張子を除いたもの
+                        app_name = exe_name.replace('.exe', '').replace('.EXE', '')
+                    else:
+                        # フォールバック: タイトルから推測
+                        app_name = window.title.split(" - ")[-1] if window.title else "Unknown"
+                except Exception as e:
+                    print(f"プロセス情報取得エラー: {e}")
+                    # フォールバック: タイトルから推測
+                    app_name = window.title.split(" - ")[-1] if window.title else "Unknown"
+            else:
+                # psutilがない場合: タイトルから推測
+                app_name = window.title.split(" - ")[-1] if window.title else "Unknown"
+            
+            # プロセス名: ウィンドウタイトルの最初の部分（" - "の前）
+            if window.title:
+                # " - " で分割して最初の部分を取得
+                parts = window.title.split(" - ")
+                if len(parts) > 1:
+                    process_name = parts[0].strip()
+                else:
+                    # " - " がない場合はタイトル全体
+                    process_name = window.title.strip()
+            else:
                 process_name = app_name
-            except:
-                pass
             
             return WindowInfo(
                 app_name=app_name,

@@ -26,6 +26,7 @@ from src.core.event_collector import EventCollector
 from src.core.glue_engine import GlueEngine
 from src.core.session_detector import SessionDetector
 from src.utils.config import get_config
+from src.utils.notification import NotificationManager
 from src.ui.main_window import MainWindow
 from src.ui.system_tray import SystemTray
 
@@ -54,7 +55,12 @@ class FocusTrackerApp:
         
         # データ処理コンポーネント
         self.glue_engine = GlueEngine(self.db)
-        self.session_detector = SessionDetector(self.db)
+        
+        # 通知マネージャー
+        self.notification_manager = NotificationManager()
+        
+        # セッション検出器（通知マネージャーを渡す）
+        self.session_detector = SessionDetector(self.db, self.notification_manager)
         
         # UI
         self.qt_app = None
@@ -64,11 +70,30 @@ class FocusTrackerApp:
         # 定期処理用タイマー
         self.glue_timer = None
         self.session_timer = None
+        
+        # AFK状態の追跡
+        self.was_afk = False
     
     def _on_window_change(self, window_info) -> None:
         """ウィンドウ変更時のコールバック"""
+        self._check_afk_status()
+        self.event_collector.on_window_change(window_info, self.was_afk)
+    
+    def _check_afk_status(self) -> None:
+        """AFK状態をチェックして通知"""
         is_afk = self.afk_detector.is_afk()
-        self.event_collector.on_window_change(window_info, is_afk)
+        idle_time = self.afk_detector.get_idle_time()
+        
+        # デバッグ情報
+        if is_afk != self.was_afk:
+            print(f"AFK状態変化: {self.was_afk} -> {is_afk} (アイドル時間: {idle_time:.1f}秒)")
+        
+        # AFK開始時に通知
+        if is_afk and not self.was_afk:
+            print(f"AFK開始を検出 (アイドル時間: {idle_time:.1f}秒)")
+            self.notification_manager.notify_afk_start()
+        
+        self.was_afk = is_afk
     
     def _process_glue_and_sessions(self) -> None:
         """定期的にGlueとセッション検出を実行"""
@@ -86,6 +111,7 @@ class FocusTrackerApp:
         print("バックグラウンドサービスを起動中...")
         
         # AFK検知開始
+        print(f"AFK検知を開始します (閾値: {self.afk_detector.threshold}秒)")
         self.afk_detector.start()
         
         # ウィンドウ監視開始
@@ -95,6 +121,11 @@ class FocusTrackerApp:
         self.glue_timer = QTimer()
         self.glue_timer.timeout.connect(self._process_glue_and_sessions)
         self.glue_timer.start(10 * 60 * 1000)  # 10分 = 600,000ミリ秒
+        
+        # AFK状態チェックタイマー(30秒ごと)
+        self.afk_check_timer = QTimer()
+        self.afk_check_timer.timeout.connect(self._check_afk_status)
+        self.afk_check_timer.start(30 * 1000)  # 30秒 = 30,000ミリ秒
         
         print("バックグラウンドサービスが起動しました")
     
@@ -124,7 +155,7 @@ class FocusTrackerApp:
         self.qt_app.setApplicationName("集中時間トラッカー")
         
         # メインウィンドウ
-        self.main_window = MainWindow(self.db)
+        self.main_window = MainWindow(self.db, self.afk_detector)
         self.main_window.show()  # 起動時にウィンドウを表示
         
         # システムトレイ
