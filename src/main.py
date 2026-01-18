@@ -80,7 +80,10 @@ class FocusTrackerApp:
     def _on_window_change(self, window_info) -> None:
         """ウィンドウ変更時のコールバック"""
         self._check_afk_status()
-        self.event_collector.on_window_change(window_info, self.was_afk)
+        
+        # AFK中は新しいイベントを記録しない
+        if not self.was_afk:
+            self.event_collector.on_window_change(window_info, False)
     
     def _check_afk_status(self) -> None:
         """AFK状態をチェックして記録"""
@@ -91,25 +94,24 @@ class FocusTrackerApp:
         if is_afk != self.was_afk:
             print(f"AFK状態変化: {self.was_afk} -> {is_afk} (アイドル時間: {idle_time:.1f}秒)")
         
-        # AFK開始時に通知
+        # AFK開始時
         if is_afk and not self.was_afk:
             print(f"AFK開始を検出 (アイドル時間: {idle_time:.1f}秒)")
             self.notification_manager.notify_afk_start()
-            # 現在のイベントのAFK状態を更新
-            self.event_collector.update_current_event_afk_status(True)
+            # 現在のイベントを終了（AFK開始時点で記録停止）
+            self.event_collector.finalize_current_event()
         
         # AFK復帰時
         if not is_afk and self.was_afk:
-            # 現在のイベントのAFK状態を更新（アクティブに戻す）
-            self.event_collector.update_current_event_afk_status(False)
+            print("AFK復帰を検出")
+            # 復帰時は次のウィンドウ変更で自動的に新しいイベントが開始される
         
         # アクティブ時は現在のイベントの終了時刻を更新（リアルタイム反映のため）
-        if not is_afk:
+        if not is_afk and self.event_collector.current_event_id is not None:
             self.event_collector.update_current_event_end_time()
         
         self.was_afk = is_afk
         
-        # UI更新（ステータスバーの時間を更新するため）
         # UI更新（ステータスバーの時間を更新するため）
         if self.main_window:
             self.main_window.update_status()

@@ -109,8 +109,13 @@ class EventCollector:
             is_afk: AFK状態かどうか
         """
         if self.current_event_id is not None:
-            # TODO: AFK状態の更新ロジックを実装
-            pass
+            cursor = self.db.conn.cursor()
+            cursor.execute(
+                "UPDATE events SET is_afk = ? WHERE id = ?",
+                (is_afk, self.current_event_id)
+            )
+            self.db.conn.commit()
+            print(f"イベントID {self.current_event_id} のAFK状態を {is_afk} に更新")
     
     def finalize_current_event(self) -> None:
         """現在のイベントを終了"""
