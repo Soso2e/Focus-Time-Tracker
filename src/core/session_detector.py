@@ -109,6 +109,10 @@ class SessionDetector:
         """
         イベント変更時にセッション状態を更新（リアルタイム追跡）
         
+        新仕様:
+        - カテゴリが同じであれば継続してカウント
+        - 10分連続使用（他カテゴリの使用がなかった）ごとに1セッション獲得
+        
         Args:
             app_name: アプリ名
             category_id: カテゴリID
@@ -121,35 +125,40 @@ class SessionDetector:
             self._finalize_active_session()
             return
         
-        session_threshold = self.config.get("session_threshold", 10) * 60  # 秒
+        session_threshold = self.config.get("session_threshold", 10)  # 分
+        duration_seconds = (event_end - event_start).total_seconds()
         
-        # 同じアプリの継続
-        if self.active_session["app_name"] == app_name:
+        # 同じカテゴリの継続
+        if self.active_session["category_id"] == category_id:
             # 時間を加算
-            duration = (event_end - event_start).total_seconds()
-            self.active_session["accumulated_seconds"] += duration
+            old_accumulated_seconds = self.active_session["accumulated_seconds"]
+            self.active_session["accumulated_seconds"] += duration_seconds
             self.active_session["last_event_end"] = event_end
+            self.active_session["app_name"] = app_name  # アプリ名は最新のものに更新
             
-            # 閾値チェック & 通知
-            current_minutes = int(self.active_session["accumulated_seconds"] / 60)
-            milestone = (current_minutes // 10) * 10  # 10分単位
+            # セッション獲得チェック（10分ごとに1セッション）
+            old_session_count = int(old_accumulated_seconds / (session_threshold * 60))
+            new_session_count = int(self.active_session["accumulated_seconds"] / (session_threshold * 60))
             
-            if current_minutes >= 10 and milestone not in self.active_session["notified_milestones"]:
-                # 新しい節目に到達
-                self.active_session["notified_milestones"].add(milestone)
-                self._save_or_update_active_session()
-                self._send_notification(milestone)  # milestone値を通知（10, 20, 30...）
+            # 新しいセッションを獲得した場合
+            if new_session_count > old_session_count:
+                # 獲得したセッション数だけ処理
+                for i in range(old_session_count + 1, new_session_count + 1):
+                    session_minutes = i * session_threshold
+                    if session_minutes not in self.active_session["notified_milestones"]:
+                        self.active_session["notified_milestones"].add(session_minutes)
+                        self._save_or_update_active_session()
+                        self._send_notification(session_minutes)
         else:
-            # 異なるアプリ → 前のセッションを確定
+            # 異なるカテゴリ → 前のセッションを確定
             self._finalize_active_session()
             
             # 新しいセッション開始
-            duration = (event_end - event_start).total_seconds()
             self.active_session = {
                 "app_name": app_name,
                 "category_id": category_id,
                 "start_time": event_start,
-                "accumulated_seconds": duration,
+                "accumulated_seconds": duration_seconds,
                 "last_event_end": event_end,
                 "notified_milestones": set(),
                 "db_session_id": None
@@ -160,8 +169,9 @@ class SessionDetector:
         if not self.active_session["app_name"]:
             return
         
-        session_threshold = self.config.get("session_threshold", 10) * 60
-        if self.active_session["accumulated_seconds"] >= session_threshold:
+        session_threshold = self.config.get("session_threshold", 10)  # 分
+        session_threshold_seconds = session_threshold * 60
+        if self.active_session["accumulated_seconds"] >= session_threshold_seconds:
             self._save_or_update_active_session()
         
         # セッションリセット
@@ -182,6 +192,10 @@ class SessionDetector:
         
         duration_minutes = int(self.active_session["accumulated_seconds"] / 60)
         
+        # カテゴリ情報を取得（ログ用）
+        category = self.db.get_category_by_id(self.active_session["category_id"])
+        category_name = category.get("name", "不明") if category else "不明"
+        
         if self.active_session["db_session_id"]:
             # 既存セッションを更新
             self.db.update_session(
@@ -190,7 +204,7 @@ class SessionDetector:
                 duration_minutes=duration_minutes,
                 event_count=1  # イベント数は簡略化
             )
-            print(f"[セッション] 更新: ID={self.active_session['db_session_id']}, {duration_minutes}分")
+            print(f"[セッション] 更新: ID={self.active_session['db_session_id']}, カテゴリ={category_name}, {duration_minutes}分")
         else:
             # 新規セッションを保存
             session_id = self.db.add_session(
@@ -202,7 +216,7 @@ class SessionDetector:
                 main_app_name=self.active_session["app_name"]
             )
             self.active_session["db_session_id"] = session_id
-            print(f"[セッション] 新規保存: ID={session_id}, {duration_minutes}分")
+            print(f"[セッション] 新規保存: ID={session_id}, カテゴリ={category_name}, {duration_minutes}分")
     
     def _send_notification(self, duration_minutes: int) -> None:
         """セッション達成通知を送信"""
